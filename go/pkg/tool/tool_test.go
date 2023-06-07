@@ -166,7 +166,7 @@ func TestTool_DownloadAction(t *testing.T) {
 		OutputFiles: []string{"a/b/out"},
 		Platform: &repb.Platform{
 			Properties: []*repb.Platform_Property{
-				&repb.Platform_Property{
+				{
 					Name:  "container-image",
 					Value: "foo",
 				},
@@ -242,7 +242,7 @@ func TestTool_ExecuteAction(t *testing.T) {
 	if string(oe.Stdout()) != "stdout" {
 		t.Errorf("Incorrect stdout %v, expected \"stdout\"", oe.Stdout())
 	}
-	// Now execute again with changed inputs.
+	// Now execute again with changed Inputs.
 	tmpDir := filepath.Join(t.TempDir(), "action_root")
 	os.MkdirAll(tmpDir, os.ModePerm)
 	inputRoot := filepath.Join(tmpDir, "input")
@@ -321,7 +321,7 @@ func TestTool_ExecuteActionFromRoot(t *testing.T) {
 		InputSpec:   &command.InputSpec{Inputs: []string{"i1", "i2"}, InputNodeProperties: map[string]*cpb.NodeProperties{"i1": fooProperties}},
 		OutputFiles: []string{"a/b/out"},
 	}
-	// Create files necessary for the fake
+	// Create Files necessary for the fake
 	if err := os.WriteFile(filepath.Join(e.ExecRoot, "i1"), []byte("i1"), 0644); err != nil {
 		t.Fatalf("failed creating input file: %v", err)
 	}
@@ -442,5 +442,54 @@ func TestTool_UploadBlob(t *testing.T) {
 	}
 	if cas.BlobWrites(dg) != 1 {
 		t.Fatalf("Expected 1 write for blob '%v', got %v", dg.String(), cas.BlobWrites(dg))
+	}
+}
+
+func TestTool_GetIO(t *testing.T) {
+	e, cleanup := fakes.NewTestEnv(t)
+	defer cleanup()
+	cmd := &command.Command{
+		Args:     []string{"tool"},
+		ExecRoot: e.ExecRoot,
+		InputSpec: &command.InputSpec{
+			Inputs:          []string{"foo.c", "bar.c"},
+			SymlinkBehavior: command.PreserveSymlink,
+		},
+	}
+	opt := command.DefaultExecutionOptions()
+	_, acDg, _, _ := e.Set(
+		cmd,
+		opt,
+		&command.Result{Status: command.CacheHitResultStatus},
+		&fakes.InputFile{Path: "foo.c", Contents: "foo"},
+		&fakes.InputSymlink{Path: "bar.c", Content: "bar", Target: "previous_dir/old_target_file"},
+		&fakes.OutputFile{Path: "a/b/out", Contents: "foo"},
+		&fakes.OutputSymlink{Path: "a/b/sl", Target: "a/b/out"},
+	)
+	toolClient := &Client{GrpcClient: e.Client.GrpcClient}
+	tmpDir := t.TempDir()
+	io, err := toolClient.GetIO(context.Background(), acDg.String())
+	if err != nil {
+		t.Fatalf("DownloadActionResult(%v,%v) failed: %v", acDg.String(), tmpDir, err)
+	}
+	getInputs := io.Inputs.Paths
+	wantInputs := map[string]string{
+		"foo.c":                               "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae/3",
+		"previous_dir/old_target_file":        "fcde2b2edba56bf408601fb721fe9b5c338d10ee429ea04fae5511b68fbf8fb9/3",
+		"bar.c->previous_dir/old_target_file": "fcde2b2edba56bf408601fb721fe9b5c338d10ee429ea04fae5511b68fbf8fb9/3",
+	}
+	if diff := cmp.Diff(wantInputs, getInputs); diff != "" {
+		t.Errorf("GetIO returned diff in Inputs' list: (-want +got)\n%s", diff)
+	}
+
+	getOutputFiles := io.Outputs.Files
+	wantOutputFiles := map[string]string{"a/b/out": "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae/3"}
+	if diff := cmp.Diff(wantOutputFiles, getOutputFiles); diff != "" {
+		t.Errorf("GetIO returned diff in Outputs' list: (-want +got)\n%s", diff)
+	}
+	getOutputFileSyms := io.Outputs.FileSymlinks
+	wantOutputFileSyms := map[string]string{"a/b/sl->a/b/out": "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae/3"}
+	if diff := cmp.Diff(wantOutputFileSyms, getOutputFileSyms); diff != "" {
+		t.Errorf("GetIO returned diff in Outputs' list: (-want +got)\n%s", diff)
 	}
 }
