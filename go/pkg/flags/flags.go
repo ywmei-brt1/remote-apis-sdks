@@ -147,3 +147,75 @@ func NewClientFromFlags(ctx context.Context, opts ...client.Opt) (*client.Client
 		MaxConcurrentStreams:  uint32(*MaxConcurrentStreams),
 	}, opts...)
 }
+
+func NewClientFromFlagsForDataFlowTest(ctx context.Context, ins, sev, auth string, opts ...client.Opt) (*client.Client, error) {
+	opts = append(opts, []client.Opt{client.CASConcurrency(*CASConcurrency), client.StartupCapabilities(*StartupCapabilities)}...)
+	if len(RPCTimeouts) > 0 {
+		timeouts := make(map[string]time.Duration)
+		for rpc, d := range client.DefaultRPCTimeouts {
+			timeouts[rpc] = d
+		}
+		// Override the defaults with flags, but do not replace.
+		for rpc, s := range RPCTimeouts {
+			d, err := time.ParseDuration(s)
+			if err != nil {
+				return nil, err
+			}
+			timeouts[rpc] = d
+		}
+		opts = append(opts, client.RPCTimeouts(timeouts))
+	}
+	var perRPCCreds *client.PerRPCCreds
+	tOpts := []client.Opt{}
+	for _, opt := range opts {
+		switch opt.(type) {
+		case *client.PerRPCCreds:
+			perRPCCreds = (opt).(*(client.PerRPCCreds))
+		default:
+			tOpts = append(tOpts, opt)
+		}
+	}
+	opts = tOpts
+
+	dialOpts := make([]grpc.DialOption, 0)
+	if *KeepAliveTime > 0*time.Second {
+		params := keepalive.ClientParameters{
+			Time:                *KeepAliveTime,
+			Timeout:             *KeepAliveTimeout,
+			PermitWithoutStream: *KeepAlivePermitWithoutStream,
+		}
+		log.V(1).Infof("KeepAlive params = %v", params)
+		dialOpts = append(dialOpts, grpc.WithKeepaliveParams(params))
+	}
+
+	if ins != "" {
+		*Instance = ins
+	}
+	if sev != "" {
+		*Service = sev
+	}
+	*UseApplicationDefaultCreds = false
+	if auth == "true" {
+		*UseApplicationDefaultCreds = true
+	}
+
+	return client.NewClient(ctx, *Instance, client.DialParams{
+		Service:               *Service,
+		NoSecurity:            *ServiceNoSecurity,
+		NoAuth:                *ServiceNoAuth,
+		CASService:            *CASService,
+		CredFile:              *CredFile,
+		DialOpts:              dialOpts,
+		UseApplicationDefault: *UseApplicationDefaultCreds,
+		UseComputeEngine:      *UseGCECredentials,
+		UseExternalAuthToken:  *UseExternalAuthToken,
+		ExternalPerRPCCreds:   perRPCCreds,
+		TransportCredsOnly:    !*UseRPCCredentials,
+		TLSServerName:         *TLSServerName,
+		TLSCACertFile:         *TLSCACert,
+		TLSClientAuthCert:     *TLSClientAuthCert,
+		TLSClientAuthKey:      *TLSClientAuthKey,
+		MaxConcurrentRequests: uint32(*MaxConcurrentRequests),
+		MaxConcurrentStreams:  uint32(*MaxConcurrentStreams),
+	}, opts...)
+}
