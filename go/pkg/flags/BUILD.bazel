@@ -3,7 +3,7 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library")
 go_library(
     name = "flags",
     srcs = ["flags.go"],
-    importpath = "github.com/bazelbuild/remote-apis-sdks/go/pkg/flags",
+    importpath = "github.com/ywmei-brt1/remote-apis-sdks/go/pkg/flags",
     visibility = ["//visibility:public"],
     deps = [
         "//go/pkg/balancer",
