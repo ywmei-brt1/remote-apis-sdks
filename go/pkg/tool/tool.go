@@ -887,6 +887,7 @@ func (c *Client) GetIO(ctx context.Context, actionDigest string) (*IO, error) {
 	var outputs []string
 	symlinks := append(resPb.GetOutputFileSymlinks(), resPb.GetOutputDirectorySymlinks()...)
 	for _, s := range symlinks {
+
 		if s != nil {
 			outputs = append(outputs, s.GetPath()+"->"+s.GetTarget())
 		}
