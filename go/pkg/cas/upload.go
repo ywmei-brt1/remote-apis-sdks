@@ -562,10 +562,13 @@ func (u *uploader) visitPath(ctx context.Context, absPath string, info os.FileIn
 		// Ignore all non-expected modes (e.g. domain sockets as used by git
 		// fsmonitor).
 		default:
-			return nil, nil
+			return nil, ErrSkip
 		}
 	})
-	if err != nil {
+	switch {
+	case errors.Is(err, ErrSkip):
+		return nil, nil
+	case err != nil:
 		return nil, err
 	}
 	return cached.(*digested), nil
@@ -907,7 +910,10 @@ func (u *uploader) scheduleUpload(ctx context.Context, item *uploadItem) error {
 	if marshalledRequestSize(item.Digest) > int64(u.batchBundler.BundleByteLimit) {
 		// There is no way this blob can fit in a batch request.
 		u.eg.Go(func() error {
-			return fmt.Errorf("%q: %w", item.Title, u.stream(ctx, item, false))
+			if err := u.stream(ctx, item, false); err != nil {
+				return fmt.Errorf("%q: %w", item.Title, err)
+			}
+			return nil
 		})
 		return nil
 	}

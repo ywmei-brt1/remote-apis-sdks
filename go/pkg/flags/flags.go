@@ -4,10 +4,12 @@ package flags
 import (
 	"context"
 	"flag"
+	"fmt"
+	"strings"
 	"time"
 
-	"github.com/bazelbuild/remote-apis-sdks/go/pkg/balancer"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/client"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/credshelper"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/moreflag"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
@@ -35,6 +37,12 @@ var (
 	// UseGCECredentials is whether to use the default GCE credentials to authenticate with remote
 	// execution. --use_application_default_credentials must be false.
 	UseGCECredentials = flag.Bool("use_gce_credentials", false, "If true (and --use_application_default_credentials is false), use the default GCE credentials to authenticate with remote execution.")
+	// CredentialsHelper specifies a path to a credentials helper binary which should be used to fetch credentials.
+	CredentialsHelper = flag.String(credshelper.CredshelperPathFlag, "", "Path to the credentials helper binary. If given execrell://, looks for the `credshelper` binary in the same folder as the current executable.")
+	// CredentialsHelperArgs specifies arguments for the credentials helper binary,
+	CredentialsHelperArgs = flag.String(credshelper.CredshelperArgsFlag, "", "Arguments for the credentials helper, separated by space.")
+	// CredsCache specifies the file path where credentials recieved from the credentials helper are cached. If no file is provided then no credentials are cached.
+	CredsCache = flag.String(credshelper.ExperimentalCredsCachePathFlag, "", "Path of the file where credentials should be cached. Credentials are not cached if no file path is provided.")
 	// UseRPCCredentials can be set to false to disable all per-RPC credentials.
 	UseRPCCredentials = flag.Bool("use_rpc_credentials", true, "If false, no per-RPC credentials will be used (disables --credential_file, --use_application_default_credentials, and --use_gce_credentials.")
 	// UseExternalAuthToken specifies whether to use an externally provided auth token, given via PerRPCCreds dial option, should be used.
@@ -54,8 +62,6 @@ var (
 	CASConcurrency = flag.Int("cas_concurrency", client.DefaultCASConcurrency, "Num concurrent upload / download RPCs that the SDK is allowed to do.")
 	// MaxConcurrentRequests denotes the maximum number of concurrent RPCs on a single gRPC connection.
 	MaxConcurrentRequests = flag.Uint("max_concurrent_requests_per_conn", client.DefaultMaxConcurrentRequests, "Maximum number of concurrent RPCs on a single gRPC connection.")
-	// MaxConcurrentStreams denotes the maximum number of concurrent stream RPCs on a single gRPC connection.
-	MaxConcurrentStreams = flag.Uint("max_concurrent_streams_per_conn", client.DefaultMaxConcurrentStreams, "Maximum number of concurrent stream RPCs on a single gRPC connection.")
 	// TLSServerName overrides the server name sent in the TLS session.
 	TLSServerName = flag.String("tls_server_name", "", "Override the TLS server name")
 	// TLSCACert loads CA certificates from a file
@@ -74,17 +80,9 @@ var (
 	KeepAliveTimeout = flag.Duration("grpc_keepalive_timeout", 20*time.Second, "After having pinged for keepalive check, the client waits for a duration of Timeout and if no activity is seen even after that the connection is closed. Default is 20s.")
 	// KeepAlivePermitWithoutStream specifies gRPCs keepalive permitWithoutStream parameter.
 	KeepAlivePermitWithoutStream = flag.Bool("grpc_keepalive_permit_without_stream", false, "If true, client sends keepalive pings even with no active RPCs; otherwise, doesn't send pings even if time and timeout are set. Default is false.")
-	// UseRoundRobinBalancer is a temporary feature flag to rollout a simplified load balancer.
-	// See http://go/remote-apis-sdks/issues/499
-	UseRoundRobinBalancer = flag.Bool("use_round_robin_balancer", false, "If true, a round-robin connection bool is used for gRPC. Otherwise, the existing load balancer is used.")
-	// RoundRobinBalancerPoolSize specifies the pool size for the round robin balancer.
-	RoundRobinBalancerPoolSize = flag.Int("round_robin_balancer_pool_size", client.DefaultMaxConcurrentRequests, "pool size for round robin grpc balacner")
 )
 
 func init() {
-	// MinConnections denotes the minimum number of gRPC sub-connections the gRPC balancer should create during SDK initialization.
-	flag.IntVar(&balancer.MinConnections, "min_grpc_connections", balancer.DefaultMinConnections, "Minimum number of gRPC sub-connections the gRPC balancer should create during SDK initialization.")
-	// RPCTimeouts stores the per-RPC timeout values. The flag allows users to override the defaults
 	// set in client.DefaultRPCTimeouts. This is in order to not force the users to familiarize
 	// themselves with every RPC, otherwise it is easy to accidentally enforce a timeout on
 	// WaitExecution, for example.
@@ -120,6 +118,13 @@ func NewClientFromFlags(ctx context.Context, opts ...client.Opt) (*client.Client
 			tOpts = append(tOpts, opt)
 		}
 	}
+	if *CredentialsHelper != "" && perRPCCreds == nil {
+		creds, err := credshelper.NewExternalCredentials(*CredentialsHelper, strings.Fields(*CredentialsHelperArgs), *CredsCache)
+		if err != nil {
+			return nil, fmt.Errorf("credentials helper failed. Please try again or use another method of authentication:%v", err)
+		}
+		perRPCCreds = &client.PerRPCCreds{Creds: creds.TokenSource()}
+	}
 	opts = tOpts
 
 	dialOpts := make([]grpc.DialOption, 0)
@@ -149,8 +154,5 @@ func NewClientFromFlags(ctx context.Context, opts ...client.Opt) (*client.Client
 		TLSClientAuthCert:     *TLSClientAuthCert,
 		TLSClientAuthKey:      *TLSClientAuthKey,
 		MaxConcurrentRequests: uint32(*MaxConcurrentRequests),
-		MaxConcurrentStreams:  uint32(*MaxConcurrentStreams),
-		RoundRobinBalancer:    *UseRoundRobinBalancer,
-		RoundRobinPoolSize:    *RoundRobinBalancerPoolSize,
 	}, opts...)
 }
