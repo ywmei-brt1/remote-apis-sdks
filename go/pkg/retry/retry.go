@@ -60,6 +60,7 @@ type ShouldRetry func(error) bool
 
 // Always always retries, regardless of error.
 func Always(error) bool { return true }
+func Never(error) bool  { return false }
 
 // TransientOnly returns true if the error is transient.
 // It implements ShouldRetry type.

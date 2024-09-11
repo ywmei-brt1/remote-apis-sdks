@@ -304,7 +304,7 @@ func (c *Client) unaryRPC(ctx context.Context, cfg *RPCConfig, f func(context.Co
 }
 
 func (c *Client) withRetries(ctx context.Context, f func(context.Context) error) error {
-	return retry.WithPolicy(ctx, retry.TransientOnly, c.Config.RetryPolicy, func() error {
+	return retry.WithPolicy(ctx, retry.Never, c.Config.RetryPolicy, func() error {
 		return f(ctx)
 	})
 }

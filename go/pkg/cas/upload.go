@@ -2,6 +2,7 @@ package cas
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -14,7 +15,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"errors"
 	log "github.com/golang/glog"
 	"github.com/google/uuid"
 	"github.com/klauspost/compress/zstd"
@@ -100,7 +100,8 @@ type UploadInput struct {
 // If the digest is unknown, returns (nil, err), where err is ErrDigestUnknown
 // according to errors.Is.
 // If the file is a danging symlink, then its digest is unknown.
-func (in *UploadInput) Digest(relPath string) (digest.Digest, error) {
+func (in *UploadInput) Digest(relPath string) (dg digest.Digest, err error) {
+	//defer log.Infof("digest is: %v", dg)
 	if in.cleanPath == "" {
 		return digest.Digest{}, errors.New("Digest called too soon")
 	}
@@ -350,6 +351,7 @@ func (c *Client) Upload(ctx context.Context, opt UploadOptions, inputC <-chan *U
 	// is the bottleneck.
 	// We might run into the request size limits only if we have >100K digests.
 	u.checkBundler.BundleCountThreshold = u.Config.FindMissingBlobs.MaxItems
+	//u.checkBundler.BundleByteLimit = 10000000000
 
 	// Initialize batchBundler, which uploads blobs in batches.
 	u.batchBundler = bundler.NewBundler(&repb.BatchUpdateBlobsRequest_Request{}, func(subReq interface{}) {
@@ -492,6 +494,9 @@ func (u *uploader) startProcessing(ctx context.Context, in *UploadInput) error {
 
 		// The entire tree is digested. Notify the caller.
 		close(in.ensureDigestsComputedInited())
+		for k, v := range in.tree {
+			log.Infof("\nInput Tree Key is: %v\nInput Tree Digest is: %v/%v\nDirEntry is: %v", k, v.digest.GetHash(), v.digest.GetSizeBytes(), v.dirEntry)
+		}
 		return nil
 	})
 	return nil
@@ -645,7 +650,7 @@ func (u *uploader) visitRegularFile(ctx context.Context, absPath string, info os
 	if err != nil {
 		return nil, fmt.Errorf("failed to compute hash: %w", err)
 	}
-	log.Infof("compute digest %s: %s", info.Name(), time.Since(now))
+	log.V(3).Infof("compute digest %s: %s", info.Name(), time.Since(now))
 	ret.Digest = dig.ToProto()
 
 	item := &uploadItem{
@@ -663,7 +668,7 @@ func (u *uploader) visitRegularFile(ctx context.Context, absPath string, info os
 		if res, err := u.findMissingBlobs(ctx, []*uploadItem{item}); err != nil {
 			return nil, fmt.Errorf("failed to check existence: %w", err)
 		} else if len(res.MissingBlobDigests) == 0 {
-			log.Infof("the file already exists. do not upload %s", absPath)
+			log.V(3).Infof("the file already exists. do not upload %s", absPath)
 			atomic.AddInt64(&u.stats.CacheHits.Digests, 1)
 			atomic.AddInt64(&u.stats.CacheHits.Bytes, ret.Digest.SizeBytes)
 			return ret, nil
@@ -895,7 +900,8 @@ func (u *uploader) check(ctx context.Context, items []*uploadItem) error {
 		missingBytes += d.SizeBytes
 		item := byDigest[digest.NewFromProtoUnvalidated(d)]
 		if err := u.scheduleUpload(ctx, item); err != nil {
-			return fmt.Errorf("%q: %w", item.Title, err)
+			log.Fatalf("scheduleUploading error.... %v : %+v, %w", item.Title, item.Digest, err)
+			return fmt.Errorf("scheduleUpload: %q: %w", item.Title, err)
 		}
 	}
 	atomic.AddInt64(&u.stats.CacheMisses.Digests, int64(len(res.MissingBlobDigests)))
@@ -910,19 +916,21 @@ func (u *uploader) scheduleUpload(ctx context.Context, item *uploadItem) error {
 	if marshalledRequestSize(item.Digest) > int64(u.batchBundler.BundleByteLimit) {
 		// There is no way this blob can fit in a batch request.
 		u.eg.Go(func() error {
-			if err := u.stream(ctx, item, false); err != nil {
-				return fmt.Errorf("%q: %w", item.Title, err)
+			err := u.stream(ctx, item, false)
+			if err != nil {
+				log.Fatalf("======= streamed uploaded this blob got err, %v, %v, %v", item.Title, item.Digest, err)
+				return fmt.Errorf("stream error: %q: %w", item.Title, err)
 			}
 			return nil
 		})
 		return nil
 	}
-
 	// Since this blob is small enough, just read it entirely.
 	contents, err := item.ReadAll()
 	if err != nil {
 		return fmt.Errorf("failed to read the item: %w", err)
 	}
+	//return nil
 	req := &repb.BatchUpdateBlobsRequest_Request{Digest: item.Digest, Data: contents}
 	return u.batchBundler.AddWait(ctx, req, proto.Size(req))
 }
@@ -978,6 +986,9 @@ func (u *uploader) uploadBatch(ctx context.Context, reqs []*repb.BatchUpdateBlob
 // If the blob is already uploaded, then the function returns quickly and
 // without an error.
 func (u *uploader) stream(ctx context.Context, item *uploadItem, updateCacheStats bool) error {
+	//log.Infof("pretend stream upload %v", item.Title)
+	//return nil
+	//log.Fatalf("faill here in steam()")
 	if err := u.semByteStreamWrite.Acquire(ctx, 1); err != nil {
 		return err
 	}
@@ -986,10 +997,10 @@ func (u *uploader) stream(ctx context.Context, item *uploadItem, updateCacheStat
 	ctx, task := trace.NewTask(ctx, "uploader.stream")
 	defer task.End()
 
-	log.Infof("start stream upload %s, size %d", item.Title, item.Digest.SizeBytes)
+	log.V(3).Infof("start stream upload %s, size %d", item.Title, item.Digest.SizeBytes)
 	now := time.Now()
 	defer func() {
-		log.Infof("finish stream upload %s, size %d: %s", item.Title, item.Digest.SizeBytes, time.Since(now))
+		log.V(3).Infof("finish stream upload %s, size %d: %s", item.Title, item.Digest.SizeBytes, time.Since(now))
 	}()
 
 	// Open the item.

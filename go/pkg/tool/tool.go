@@ -257,9 +257,14 @@ func (c *Client) DownloadBlob(ctx context.Context, blobDigest, path string) (str
 		return "", err
 	}
 	log.Infof("Downloading blob of %v to %v.", dg, path)
-	if _, err := c.GrpcClient.ReadBlobToFile(ctx, dg, path); err != nil {
+	st := time.Now()
+	stats, err := c.GrpcClient.ReadBlobToFile(ctx, dg, path)
+	if err != nil {
 		return "", err
 	}
+	et := time.Now()
+	log.Infof("ReadBlobToFile takes: %v", et.Sub(st))
+	log.Infof("MoveMetadata is : %+v", stats)
 	if !outputToStdout {
 		return "", nil
 	}
@@ -295,6 +300,12 @@ func (c *Client) UploadBlobV2(ctx context.Context, path string) error {
 
 	eg, ctx := errgroup.WithContext(ctx)
 
+	st := time.Now()
+	defer func() {
+		et := time.Now()
+		log.Warningf(" ======== UploadBlobV2 casC.Upload takes %v", et.Sub(st))
+	}()
+
 	eg.Go(func() error {
 		inputC <- &cas.UploadInput{
 			Path: path,
@@ -304,7 +315,11 @@ func (c *Client) UploadBlobV2(ctx context.Context, path string) error {
 	})
 
 	eg.Go(func() error {
-		_, err := casC.Upload(ctx, cas.UploadOptions{}, inputC)
+		res, err := casC.Upload(ctx, cas.UploadOptions{
+			PreserveSymlinks:      true,
+			AllowDanglingSymlinks: true,
+		}, inputC)
+		log.Warningf(" ======== UploadBlobV2 casC.Upload res is %+v", *res)
 		return err
 	})
 
@@ -340,10 +355,21 @@ type UploadStats struct {
 // UploadDirectory uploads a directory from the specified path as a Merkle-tree to the remote cache.
 func (c *Client) UploadDirectory(ctx context.Context, path string, symlinkBehavior command.SymlinkBehaviorType) (*UploadStats, error) {
 	log.Infof("Computing Merkle tree rooted at %s", path)
-	root, blobs, stats, err := c.GrpcClient.ComputeMerkleTree(ctx, path, "", "", &command.InputSpec{Inputs: []string{"."}, SymlinkBehavior: symlinkBehavior}, filemetadata.NewNoopCache())
+	st := time.Now()
+	is := &command.InputSpec{
+		Inputs:               []string{"."},
+		VirtualInputs:        nil,
+		InputExclusions:      nil,
+		EnvironmentVariables: nil,
+		SymlinkBehavior:      2,
+		InputNodeProperties:  nil,
+	}
+	root, blobs, stats, err := c.GrpcClient.ComputeMerkleTree(ctx, path, "", "", is, filemetadata.NewNoopCache())
 	if err != nil {
 		return &UploadStats{Error: err.Error()}, err
 	}
+	et := time.Now()
+	log.Warningf("ComputeMerkleTree time is: %v", et.Sub(st))
 	us := &UploadStats{
 		TreeStats:  *stats,
 		RootDigest: root,
@@ -352,7 +378,11 @@ func (c *Client) UploadDirectory(ctx context.Context, path string, symlinkBehavi
 	log.Infof("Directory root digest: %v", root)
 	log.Infof("Directory stats: %d files, %d directories, %d symlinks, %d total bytes", stats.InputFiles, stats.InputDirectories, stats.InputSymlinks, stats.TotalInputBytes)
 	log.Infof("Uploading directory %v rooted at %s to CAS.", root, path)
+	st = time.Now()
 	missing, n, err := c.GrpcClient.UploadIfMissing(ctx, blobs...)
+	et = time.Now()
+	log.Warningf("UploadIfMissing time is: %v", et.Sub(st))
+	log.Warningf("Real Bytes Uploaded: %v", n)
 	if err != nil {
 		us.Error = err.Error()
 		return us, err

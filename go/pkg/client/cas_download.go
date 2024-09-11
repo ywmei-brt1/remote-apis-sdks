@@ -84,6 +84,8 @@ func (c *Client) DownloadOutputs(ctx context.Context, outs map[string]*TreeOutpu
 	var symlinks, copies []*TreeOutput
 	downloads := make(map[digest.Digest]*TreeOutput)
 	fullStats := &MovedBytesMetadata{}
+
+	st := time.Now()
 	for _, out := range outs {
 		path := filepath.Join(outDir, out.Path)
 		if out.IsEmptyDirectory {
@@ -110,12 +112,22 @@ func (c *Client) DownloadOutputs(ctx context.Context, outs map[string]*TreeOutpu
 			downloads[out.Digest] = out
 		}
 	}
+	et := time.Now()
+
+	log.Warningf("== Prepare downloads (map) and fullStats (metadata) takes %v", et.Sub(st))
+
+	st1 := time.Now()
 	stats, err := c.DownloadFiles(ctx, outDir, downloads)
+	st2 := time.Now()
 	fullStats.addFrom(stats)
 	if err != nil {
 		return fullStats, err
 	}
+	et = time.Now()
+	log.Warningf("== Real download (DownloadFiles) takes %v", st2.Sub(st1))
+	log.Warningf("== Real download (addFrom) takes %v", et.Sub(st2))
 
+	st = time.Now()
 	for _, output := range downloads {
 		path := output.Path
 		md := &filemetadata.Metadata{
@@ -130,6 +142,10 @@ func (c *Client) DownloadOutputs(ctx context.Context, outs map[string]*TreeOutpu
 			return fullStats, err
 		}
 	}
+	et = time.Now()
+	log.Warningf("== Update Filemetadata takes %v", et.Sub(st))
+
+	st = time.Now()
 	for _, out := range copies {
 		perm := c.RegularMode
 		if out.IsExecutable {
@@ -143,11 +159,17 @@ func (c *Client) DownloadOutputs(ctx context.Context, outs map[string]*TreeOutpu
 			return fullStats, err
 		}
 	}
+	et = time.Now()
+	log.Warningf("== Copy files takes %v", et.Sub(st))
+
+	st = time.Now()
 	for _, out := range symlinks {
 		if err := os.Symlink(out.SymlinkTarget, filepath.Join(outDir, out.Path)); err != nil {
 			return fullStats, err
 		}
 	}
+	et = time.Now()
+	log.Warningf("== Create Symlinks takes %v", et.Sub(st))
 	return fullStats, nil
 }
 
@@ -158,17 +180,25 @@ func (c *Client) DownloadDirectory(ctx context.Context, d digest.Digest, outDir 
 	dir := &repb.Directory{}
 	stats := &MovedBytesMetadata{}
 
+	st := time.Now()
 	protoStats, err := c.ReadProto(ctx, d, dir)
 	stats.addFrom(protoStats)
 	if err != nil {
 		return nil, stats, fmt.Errorf("digest %v cannot be mapped to a directory proto: %v", d, err)
 	}
+	et := time.Now()
+	log.Warningf("ReadProto takes: %v", et.Sub(st))
 
+	st = time.Now()
+	c.rpcTimeouts["GetTree"] = 10 * time.Minute
 	dirs, err := c.GetDirectoryTree(ctx, d.ToProto())
 	if err != nil {
 		return nil, stats, err
 	}
+	et = time.Now()
+	log.Warningf("GetDirectoryTree takes: %v", et.Sub(st))
 
+	st = time.Now()
 	outputs, err := c.FlattenTree(&repb.Tree{
 		Root:     dir,
 		Children: dirs,
@@ -176,9 +206,15 @@ func (c *Client) DownloadDirectory(ctx context.Context, d digest.Digest, outDir 
 	if err != nil {
 		return nil, stats, err
 	}
+	et = time.Now()
+	log.Warningf("FlattenTree takes: %v", et.Sub(st))
 
+	st = time.Now()
 	outStats, err := c.DownloadOutputs(ctx, outputs, outDir, cache)
 	stats.addFrom(outStats)
+	et = time.Now()
+	log.Warningf("DownloadOutputs takes: %v", et.Sub(st))
+	log.Warningf("MoveMetadata is : %+v", stats)
 	return outputs, stats, err
 }
 

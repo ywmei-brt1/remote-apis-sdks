@@ -3,6 +3,7 @@ package client
 // This module provides functionality for constructing a Merkle tree of uploadable inputs.
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,7 +11,6 @@ import (
 	"sort"
 	"strings"
 
-	"errors"
 	cpb "github.com/bazelbuild/remote-apis-sdks/go/api/command"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/command"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
@@ -124,7 +124,7 @@ func getRelPath(base, path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if strings.HasPrefix(rel, "..") {
+	if strings.HasPrefix(rel, "../") || strings.HasPrefix(rel, "..\\") {
 		return "", fmt.Errorf("path %v is not under %v", path, base)
 	}
 	return rel, nil
@@ -166,6 +166,8 @@ func getRemotePath(path, workingDir, remoteWorkingDir string) (string, error) {
 // This has unintuitive implications. For example, execRoot=/root and path=/foo, returns relPath=foo.
 func getExecRootRelPaths(path, execRoot, workingDir, remoteWorkingDir string) (relPath string, remoteRelPath string, err error) {
 	absPath := filepath.Join(execRoot, path)
+	// execRoot := /usr/local/google/home/ywmei/Workspace/master-tuscany-dev/out
+	// absPath:=  /usr/local/google/home/ywmei/Workspace/master-tuscany-dev/out/..path_interposer_intermediates
 	if relPath, err = getRelPath(execRoot, absPath); err != nil {
 		return "", "", err
 	}
@@ -278,6 +280,7 @@ func loadIntermediateSymlinks(symlinks []string, execRoot, workingDir, remoteWor
 // loadFiles reads all files specified by the given InputSpec (descending into subdirectories
 // recursively), and loads their contents into the provided map.
 func loadFiles(execRoot, localWorkingDir, remoteWorkingDir string, excl []*command.InputExclusion, filesToProcess []string, fs map[string]*fileSysNode, cache filemetadata.Cache, opts *TreeSymlinkOpts, nodeProperties map[string]*cpb.NodeProperties) error {
+	log.Warningf("=== %+v ===", opts)
 	if opts == nil {
 		opts = DefaultTreeSymlinkOpts()
 	}
@@ -303,6 +306,11 @@ func loadFiles(execRoot, localWorkingDir, remoteWorkingDir string, excl []*comma
 		absPath := filepath.Join(execRoot, relPath)
 		normPath, remoteNormPath, err := getExecRootRelPaths(relPath, execRoot, localWorkingDir, remoteWorkingDir)
 		if err != nil {
+			log.Warningf(">>><<<<==")
+			log.Warningf("relPath: %+v", relPath)
+			log.Warningf("execRoot: %+v", execRoot)
+			log.Warningf("localWorkingDir: %+v", localWorkingDir)
+			log.Warningf("remoteWorkingDir: %+v", remoteWorkingDir)
 			return err
 		}
 		np := nodeProperties[remoteNormPath]
@@ -415,6 +423,7 @@ func (c *Client) ComputeMerkleTree(ctx context.Context, execRoot, workingDir, re
 	stats = &TreeStats{}
 	fs := make(map[string]*fileSysNode)
 	slOpts := treeSymlinkOpts(c.TreeSymlinkOpts, is.SymlinkBehavior)
+
 	for _, i := range is.VirtualInputs {
 		if i.Path == "" {
 			return digest.Empty, nil, nil, errors.New("empty Path in VirtualInputs")
@@ -431,6 +440,7 @@ func (c *Client) ComputeMerkleTree(ctx context.Context, execRoot, workingDir, re
 				return digest.Empty, nil, nil, err
 			}
 		}
+		log.Warningf("======== preserved sl 4==========")
 		normPath, remoteNormPath, err := getExecRootRelPaths(path, execRoot, workingDir, remoteWorkingDir)
 		if err != nil {
 			return digest.Empty, nil, nil, err
@@ -464,9 +474,11 @@ func (c *Client) ComputeMerkleTree(ctx context.Context, execRoot, workingDir, re
 			nodeProperties: np,
 		}
 	}
+	log.Warningf("======== 1 ==========")
 	if err := loadFiles(execRoot, workingDir, remoteWorkingDir, is.InputExclusions, is.Inputs, fs, cache, slOpts, is.InputNodeProperties); err != nil {
 		return digest.Empty, nil, nil, err
 	}
+	log.Warningf("======== 2 ==========")
 	ft, err := buildTree(fs)
 	if err != nil {
 		return digest.Empty, nil, nil, err

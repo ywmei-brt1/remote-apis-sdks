@@ -120,7 +120,7 @@ var RemoteToolOperations = map[OpType]func(ctx context.Context, c *Client){
 	},
 	uploadBlobV2: func(ctx context.Context, c *Client) {
 		if err := c.UploadBlobV2(ctx, getPathFlag()); err != nil {
-			log.Exitf("error uploading blob for digest %v: %v", getDigestFlag(), err)
+			log.Exitf("error uploading blobv2:  %v", err)
 		}
 	},
 	uploadDir: func(ctx context.Context, c *Client) {
