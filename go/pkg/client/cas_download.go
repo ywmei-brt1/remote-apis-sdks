@@ -19,6 +19,7 @@ import (
 	log "github.com/golang/glog"
 	"github.com/klauspost/compress/zstd"
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/sync/semaphore"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
@@ -146,7 +147,10 @@ func (c *Client) DownloadOutputs(ctx context.Context, outs map[string]*TreeOutpu
 	log.Warningf("== Update Filemetadata takes %v", et.Sub(st))
 
 	st = time.Now()
+	eg := new(errgroup.Group)
+	sem := semaphore.NewWeighted(7000)
 	for _, out := range copies {
+		out := out
 		perm := c.RegularMode
 		if out.IsExecutable {
 			perm = c.ExecutableMode
@@ -155,10 +159,16 @@ func (c *Client) DownloadOutputs(ctx context.Context, outs map[string]*TreeOutpu
 		if src.IsEmptyDirectory {
 			return fullStats, fmt.Errorf("unexpected empty directory: %s", src.Path)
 		}
-		if err := copyFile(outDir, outDir, src.Path, out.Path, perm); err != nil {
-			return fullStats, err
+		if err := sem.Acquire(ctx, 1); err != nil {
+			log.Fatalf("Failed to acquire semaphore :%v", err)
 		}
+		eg.Go(func() error {
+			defer sem.Release(1)
+			log.V(3).Infof("== copy file %v", out.Path)
+			return copyFile(outDir, outDir, src.Path, out.Path, perm)
+		})
 	}
+	eg.Wait()
 	et = time.Now()
 	log.Warningf("== Copy files takes %v", et.Sub(st))
 
