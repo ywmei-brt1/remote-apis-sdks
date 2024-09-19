@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package tree_output;
+
+option go_package = "github.com/bazelbuild/remote-apis-sdks/go/api/tree_output";
+
+import "build/bazel/remote/execution/v2/remote_execution.proto";
+
+message TreeOutput {
+  build.bazel.remote.execution.v2.Digest digest = 1;
+  bool is_executable = 3;
+  bool is_empty_directory = 4;
+  string symlink_target = 5;
+  build.bazel.remote.execution.v2.NodeProperties node_properties = 6;
+  reserved  2;
+}
+
+message FlatFiles {
+  map<string, TreeOutput> files = 1;
+}

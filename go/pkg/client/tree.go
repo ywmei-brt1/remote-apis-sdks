@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	cpb "github.com/bazelbuild/remote-apis-sdks/go/api/command"
+	tpb "github.com/bazelbuild/remote-apis-sdks/go/api/tree_output"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/command"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/filemetadata"
@@ -608,6 +609,88 @@ func (c *Client) FlattenTree(tree *repb.Tree, rootPath string) (map[string]*Tree
 		dirs[dg] = ue
 	}
 	return flattenTree(root, rootPath, dirs)
+}
+
+// This method invoked during saving manifest to disk and then upload it to cas.
+func (c *Client) FlattenTreePb(tree *repb.Tree, rootPath string) (*tpb.FlatFiles, error) {
+	root, err := digest.NewFromMessage(tree.Root)
+	if err != nil {
+		return nil, err
+	}
+	dirs := make(map[digest.Digest]*repb.Directory)
+	dirs[root] = tree.Root
+	for _, ue := range tree.Children {
+		dg, e := digest.NewFromMessage(ue)
+		if e != nil {
+			return nil, e
+		}
+		dirs[dg] = ue
+	}
+	return flattenTreePb(root, rootPath, dirs)
+}
+
+func flattenTreePb(root digest.Digest, rootPath string, dirs map[digest.Digest]*repb.Directory) (*tpb.FlatFiles, error) {
+	// Create a queue of unprocessed directories, along with their flattened
+	// path names.
+	type queueElem struct {
+		d digest.Digest
+		p string
+	}
+	var queue []*queueElem
+	queue = append(queue, &queueElem{d: root, p: rootPath})
+
+	// Process the queue, recording all flattened TreeOutputs as we go.
+	flatFiles := make(map[string]*tpb.TreeOutput)
+	for len(queue) > 0 {
+		flatDir := queue[0]
+		queue = queue[1:]
+
+		dir, ok := dirs[flatDir.d]
+		if !ok {
+			return nil, fmt.Errorf("couldn't find directory %s with digest %s", flatDir.p, flatDir.d)
+		}
+
+		// Check whether this is an empty directory.
+		if len(dir.Files)+len(dir.Directories)+len(dir.Symlinks) == 0 {
+			flatFiles[flatDir.p] = &tpb.TreeOutput{
+				Digest:           digest.Empty.ToProto(),
+				IsExecutable:     false,
+				IsEmptyDirectory: true,
+				NodeProperties:   dir.NodeProperties,
+			}
+			continue
+		}
+
+		// Add files to the set to return
+		for _, file := range dir.Files {
+			out := &tpb.TreeOutput{
+				Digest:         digest.NewFromProtoUnvalidated(file.Digest).ToProto(),
+				IsExecutable:   file.IsExecutable,
+				NodeProperties: file.NodeProperties,
+			}
+			flatFiles[filepath.Join(flatDir.p, file.Name)] = out
+		}
+
+		// Add symlinks to the set to return
+		for _, sm := range dir.Symlinks {
+			out := &tpb.TreeOutput{
+				SymlinkTarget:  sm.Target,
+				NodeProperties: sm.NodeProperties,
+			}
+			flatFiles[filepath.Join(flatDir.p, sm.Name)] = out
+		}
+
+		// Add subdirectories to the queue
+		for _, subdir := range dir.Directories {
+			digest := digest.NewFromProtoUnvalidated(subdir.Digest)
+			name := filepath.Join(flatDir.p, subdir.Name)
+			queue = append(queue, &queueElem{d: digest, p: name})
+		}
+	}
+	flatFilesPb := tpb.FlatFiles{
+		Files: flatFiles,
+	}
+	return &flatFilesPb, nil
 }
 
 func flattenTree(root digest.Digest, rootPath string, dirs map[digest.Digest]*repb.Directory) (map[string]*TreeOutput, error) {

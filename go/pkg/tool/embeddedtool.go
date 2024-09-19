@@ -47,6 +47,8 @@ const (
 	downloadAction       OpType = "download_action"
 	downloadBlob         OpType = "download_blob"
 	downloadDir          OpType = "download_dir"
+	downloadManifest     OpType = "download_manifest"
+	downloadFromManifest OpType = "download_from_manifest"
 	executeAction        OpType = "execute_action"
 	checkDeterminism     OpType = "check_determinism"
 	uploadBlob           OpType = "upload_blob"
@@ -85,6 +87,16 @@ var RemoteToolOperations = map[OpType]func(ctx context.Context, c *Client){
 	downloadDir: func(ctx context.Context, c *Client) {
 		if err := c.DownloadDirectory(ctx, getDigestFlag(), getPathFlag()); err != nil {
 			log.Exitf("error downloading directory for digest %v: %v", getDigestFlag(), err)
+		}
+	},
+	downloadManifest: func(ctx context.Context, c *Client) {
+		if err := c.DownloadDirectoryAsManifestFile(ctx, getDigestFlag(), getPathFlag()); err != nil {
+			log.Exitf("error downloading manifest for digest %v: %v", getDigestFlag(), err)
+		}
+	},
+	downloadFromManifest: func(ctx context.Context, c *Client) {
+		if err := c.DownloadDirectoryFromManifestFile(ctx, getDigestFlag(), getPathFlag()); err != nil {
+			log.Exitf("error downloading from manifest for digest %v: %v", getDigestFlag(), err)
 		}
 	},
 	showAction: func(ctx context.Context, c *Client) {

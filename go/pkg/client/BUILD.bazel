@@ -17,6 +17,7 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//go/api/command",
+        "//go/api/tree_output",
         "//go/pkg/actas",
         "//go/pkg/balancer",
         "//go/pkg/chunker",

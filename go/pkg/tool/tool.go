@@ -341,6 +341,43 @@ func (c *Client) DownloadDirectory(ctx context.Context, rootDigest, path string)
 	return err
 }
 
+// Download a dir from CAS without the content, save the structure as manifest file, then write it to local disk, and save the manifest back to CAS.
+// log how big it is, and how long it takes to upload.
+func (c *Client) DownloadDirectoryAsManifestFile(ctx context.Context, rootDigest, path string) error {
+	log.Infof("Cleaning contents of %v.", path)
+	os.RemoveAll(path)
+	os.Mkdir(path, 0755)
+	os.RemoveAll(path + ".manifest")
+
+	dg, err := digest.NewFromString(rootDigest)
+	if err != nil {
+		return err
+	}
+	log.Infof("Downloading input root %v to %v.", dg, path)
+	err = c.GrpcClient.DownloadDirectoryAsManifestFile(ctx, dg, path)
+	st := time.Now()
+	c.UploadBlobV2(ctx, path+".manifest")
+	et := time.Now()
+	log.Warningf("====== upload the manifest file to CAS takes %v", et.Sub(st))
+	return err
+}
+
+func (c *Client) DownloadDirectoryFromManifestFile(ctx context.Context, manifestDigest, path string) error {
+	log.Infof("Cleaning contents of %v.", path)
+	os.RemoveAll(path)
+	os.Mkdir(path, 0755)
+	// Download the manifest file here:
+	st := time.Now()
+	_, err := c.DownloadBlob(ctx, manifestDigest, path+".manifest")
+	if err != nil {
+		log.Fatalf("Cannot download the manifest from CAS: %v\n %v", path+".manifest", err)
+	}
+	et := time.Now()
+	log.Warningf("=========  Download manifest file takes: %v", et.Sub(st))
+	_, err = c.GrpcClient.DownloadDirectoryFromManifestFilePb(ctx, path, filemetadata.NewNoopCache())
+	return err
+}
+
 // UploadStats contains various metadata of a directory upload.
 type UploadStats struct {
 	rc.TreeStats

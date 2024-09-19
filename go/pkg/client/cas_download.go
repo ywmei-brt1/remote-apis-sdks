@@ -3,6 +3,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"encoding/gob"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	tpb "github.com/bazelbuild/remote-apis-sdks/go/api/tree_output"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/contextmd"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/digest"
 	"github.com/bazelbuild/remote-apis-sdks/go/pkg/filemetadata"
@@ -76,6 +78,123 @@ func (c *Client) DownloadFiles(ctx context.Context, outDir string, outputs map[d
 		}
 	}
 	return stats, nil
+}
+
+func (c *Client) DownloadOutputsPb(ctx context.Context, outs *tpb.FlatFiles, outDir string, cache filemetadata.Cache) (*MovedBytesMetadata, error) {
+	var symlinks, copies []*TreeOutput
+	downloads := make(map[digest.Digest]*TreeOutput)
+	fullStats := &MovedBytesMetadata{}
+	var err error
+	st := time.Now()
+	for key, file := range outs.Files {
+		dg := digest.Empty
+		if file.GetDigest() != nil {
+			dg, err = digest.NewFromProto(file.GetDigest())
+			if err != nil {
+				log.Fatalf("can't read dg from pb: %v", err)
+			}
+		}
+		out := &TreeOutput{
+			Digest:           dg,
+			Path:             key,
+			IsExecutable:     file.GetIsExecutable(),
+			IsEmptyDirectory: file.GetIsEmptyDirectory(),
+			SymlinkTarget:    file.GetSymlinkTarget(),
+			NodeProperties:   file.GetNodeProperties(),
+		}
+		path := filepath.Join(outDir, out.Path)
+		if out.IsEmptyDirectory {
+			if err := os.MkdirAll(path, c.DirMode); err != nil {
+				return fullStats, err
+			}
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(path), c.DirMode); err != nil {
+			return fullStats, err
+		}
+		// We create the symbolic links after all regular downloads are finished, because dangling
+		// links will not work.
+		if out.SymlinkTarget != "" {
+			symlinks = append(symlinks, out)
+			continue
+		}
+		if _, ok := downloads[out.Digest]; ok {
+			copies = append(copies, out)
+			// All copies are effectivelly cached
+			fullStats.Requested += out.Digest.Size
+			fullStats.Cached += out.Digest.Size
+		} else {
+			downloads[out.Digest] = out
+		}
+	}
+	et := time.Now()
+
+	log.Warningf("== Prepare downloads (map) and fullStats (metadata) takes %v", et.Sub(st))
+
+	st1 := time.Now()
+	stats, err := c.DownloadFiles(ctx, outDir, downloads)
+	st2 := time.Now()
+	fullStats.addFrom(stats)
+	if err != nil {
+		return fullStats, err
+	}
+	et = time.Now()
+	log.Warningf("== Real download (DownloadFiles) takes %v", st2.Sub(st1))
+	log.Warningf("== Real download (addFrom) takes %v", et.Sub(st2))
+
+	st = time.Now()
+	for _, output := range downloads {
+		path := output.Path
+		md := &filemetadata.Metadata{
+			Digest:       output.Digest,
+			IsExecutable: output.IsExecutable,
+		}
+		absPath := path
+		if !filepath.IsAbs(absPath) {
+			absPath = filepath.Join(outDir, absPath)
+		}
+		if err := cache.Update(absPath, md); err != nil {
+			return fullStats, err
+		}
+	}
+	et = time.Now()
+	log.Warningf("== Update Filemetadata takes %v", et.Sub(st))
+
+	st = time.Now()
+	eg := new(errgroup.Group)
+	sem := semaphore.NewWeighted(7000)
+	for _, out := range copies {
+		out := out
+		perm := c.RegularMode
+		if out.IsExecutable {
+			perm = c.ExecutableMode
+		}
+		src := downloads[out.Digest]
+		if src.IsEmptyDirectory {
+			return fullStats, fmt.Errorf("unexpected empty directory: %s", src.Path)
+		}
+		if err := sem.Acquire(ctx, 1); err != nil {
+			log.Fatalf("Failed to acquire semaphore :%v", err)
+		}
+		eg.Go(func() error {
+			defer sem.Release(1)
+			log.V(3).Infof("== copy file %v", out.Path)
+			return copyFile(outDir, outDir, src.Path, out.Path, perm)
+		})
+	}
+	eg.Wait()
+	et = time.Now()
+	log.Warningf("== Copy files takes %v", et.Sub(st))
+
+	st = time.Now()
+	for _, out := range symlinks {
+		if err := os.Symlink(out.SymlinkTarget, filepath.Join(outDir, out.Path)); err != nil {
+			return fullStats, err
+		}
+	}
+	et = time.Now()
+	log.Warningf("== Create Symlinks takes %v", et.Sub(st))
+	return fullStats, nil
 }
 
 // DownloadOutputs downloads the specified outputs. It returns the amount of downloaded bytes.
@@ -226,6 +345,99 @@ func (c *Client) DownloadDirectory(ctx context.Context, d digest.Digest, outDir 
 	log.Warningf("DownloadOutputs takes: %v", et.Sub(st))
 	log.Warningf("MoveMetadata is : %+v", stats)
 	return outputs, stats, err
+}
+
+// DownloadDirectoryAsManifestFile writes the manifest of the entire directory of given digest as FlattenTree to disk.
+// This method does not actually download the content of the file from CAS.
+func (c *Client) DownloadDirectoryAsManifestFile(ctx context.Context, d digest.Digest, outDir string) error {
+	dir := &repb.Directory{}
+
+	st := time.Now()
+	_, err := c.ReadProto(ctx, d, dir)
+	if err != nil {
+		return fmt.Errorf("digest %v cannot be mapped to a directory proto: %v", d, err)
+	}
+	et := time.Now()
+	log.Warningf("ReadProto takes: %v", et.Sub(st))
+
+	st = time.Now()
+	c.rpcTimeouts["GetTree"] = 10 * time.Minute
+	dirs, err := c.GetDirectoryTree(ctx, d.ToProto())
+	if err != nil {
+		return err
+	}
+	et = time.Now()
+	log.Warningf("GetDirectoryTree takes: %v", et.Sub(st))
+
+	st = time.Now()
+	outputs, err := c.FlattenTreePb(&repb.Tree{
+		Root:     dir,
+		Children: dirs,
+	}, "")
+	if err != nil {
+		return err
+	}
+	et = time.Now()
+	log.Warningf("FlattenTree takes: %v", et.Sub(st))
+	st = time.Now()
+	data, err := proto.Marshal(outputs)
+	if err != nil {
+		return fmt.Errorf("error marshaling outputs: %w", err)
+	}
+	err = os.WriteFile(outDir+".manifest", data, 0644)
+	if err != nil {
+		log.Fatalf("cannot create manifest file at %v.manifest", outDir)
+	}
+	et = time.Now()
+	log.Warningf("==== Writing the pb file to disk takes: %v", et.Sub(st))
+	return err
+}
+
+func (c *Client) DownloadDirectoryFromManifestFilePb(ctx context.Context, outDir string, cache filemetadata.Cache) (map[string]*TreeOutput, error) {
+	st := time.Now()
+	data, err := os.ReadFile(outDir + ".manifest")
+	if err != nil {
+		log.Fatalf("cannot open manifest file at: %v", outDir+".manifest")
+	}
+	flatFiles := &tpb.FlatFiles{}
+	err = proto.Unmarshal(data, flatFiles)
+	if err != nil {
+		log.Fatalf("cannot unmarshal manifest file at: %v: %v", outDir+".manifest", err)
+	}
+	et := time.Now()
+	log.Warningf("== Decoding manifest file takes: %v", et.Sub(st))
+	st = time.Now()
+	// Need to modify here to pass a protobuf message object and use DownloadOutputsPb
+	_, err = c.DownloadOutputsPb(ctx, flatFiles, outDir, cache)
+	if err != nil {
+		log.Fatalf("error when download outputs...")
+	}
+	et = time.Now()
+	log.Warningf("DownloadOutputs takes: %v", et.Sub(st))
+	return nil, err
+}
+
+func (c *Client) DownloadDirectoryFromManifestFile(ctx context.Context, outDir string, cache filemetadata.Cache) (map[string]*TreeOutput, error) {
+	st := time.Now()
+	file, err := os.Open(outDir + ".manifest")
+	if err != nil {
+		log.Fatalf("cannot open manifest file at: %v", outDir+".manifest")
+	}
+	defer file.Close()
+	decoder := gob.NewDecoder(file)
+	outputs := map[string]*TreeOutput{}
+	decoder.Decode(&outputs)
+	et := time.Now()
+	log.Warningf("== Decoding manifest file takes: %v", et.Sub(st))
+	st = time.Now()
+	// Need to modify here to pass a protobuf message object and use DownloadOutputsPb
+	_, err = c.DownloadOutputs(ctx, outputs, outDir, cache)
+	if err != nil {
+		log.Fatalf("error when download outputs...")
+	}
+	et = time.Now()
+	log.Warningf("DownloadOutputs takes: %v", et.Sub(st))
+	return outputs, err
 }
 
 // zstdDecoder is a shared instance that should only be used in stateless mode, i.e. only by calling DecodeAll()
